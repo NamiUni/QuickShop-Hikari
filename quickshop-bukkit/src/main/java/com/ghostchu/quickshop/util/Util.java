@@ -17,7 +17,6 @@ import com.ghostchu.quickshop.obj.QUserImpl;
 import com.ghostchu.quickshop.shop.SimpleInfo;
 import com.ghostchu.quickshop.shop.display.AbstractDisplayItem;
 import com.ghostchu.quickshop.util.logger.Log;
-import io.papermc.lib.PaperLib;
 import lombok.Getter;
 import lombok.Setter;
 import net.kyori.adventure.text.Component;
@@ -70,12 +69,15 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -162,6 +164,12 @@ public class Util {
     }
 
     final ItemStack stack = item.clone();
+
+    final int maxSize = Util.getItemMaxStackSize(stack.getType());
+    if(stack.getAmount() > maxSize) {
+      stack.setAmount(maxSize);
+    }
+
     if(stack.getType().isAir()) {
       Log.debug("Invalid trade item: air");
       return false; // Air cannot be used for trade
@@ -277,7 +285,7 @@ public class Util {
     if(!isShoppables(b.getType())) {
       return false;
     }
-    final BlockState bs = PaperLib.getBlockState(b, false).getState();
+    final BlockState bs = b.getState(false);
     final boolean container = bs instanceof InventoryHolder;
     if(!container) {
       if(Util.isDevMode()) {
@@ -289,12 +297,13 @@ public class Util {
   }
 
   public static boolean isBlacklistWorld(@NotNull final World world) {
-      final List<String> whitelist = plugin.getConfig().getStringList("shop.whitelist-world");
-      if (!whitelist.isEmpty()) {
-          return !whitelist.contains(world.getName());
-      }
-      // fall back to blacklist check
-      return plugin.getConfig().getStringList("shop.blacklist-world").contains(world.getName());
+
+    final List<String> whitelist = plugin.getConfig().getStringList("shop.whitelist-world");
+    if(!whitelist.isEmpty()) {
+      return !whitelist.contains(world.getName());
+    }
+    // fall back to blacklist check
+    return plugin.getConfig().getStringList("shop.blacklist-world").contains(world.getName());
   }
 
   /**
@@ -305,11 +314,12 @@ public class Util {
    * @return true if the world should be skipped, false otherwise
    */
   public static boolean isDatabaseLoadingBlacklisted(@NotNull final String worldName) {
-      final List<String> whitelist = plugin.getConfig().getStringList("database-loading-whitelist-worlds");
-      if (!whitelist.isEmpty()) {
-          return !whitelist.contains(worldName);
-      }
-      return plugin.getConfig().getStringList("database-loading-blacklist-worlds").contains(worldName);
+
+    final List<String> whitelist = plugin.getConfig().getStringList("database-loading-whitelist-worlds");
+    if(!whitelist.isEmpty()) {
+      return !whitelist.contains(worldName);
+    }
+    return plugin.getConfig().getStringList("database-loading-blacklist-worlds").contains(worldName);
   }
 
   /**
@@ -491,7 +501,7 @@ public class Util {
 
         if(exponent > 0) {
 
-          final int digits = QuickShop.getInstance().getConfig().getInt("maximum-digits-in-price", -1);
+          final int digits = QuickShop.getInstance().getConfig().getInt("shop.maximum-digits-in-price", -1);
           final BigDecimal value = baseValue.multiply(BigDecimal.TEN.pow(exponent));
           if(digits == -1) {
             return value;
@@ -554,9 +564,9 @@ public class Util {
       }
       yamlConfiguration.loadFromString(config);
       return yamlConfiguration.getItemStack("item");
-    } catch(final Exception e) {
+    } catch(final Throwable th) {
 
-      QuickShop.getInstance().logger().warn("Failed load shop data, because target config can't deserialize the ItemStack", e);
+      QuickShop.getInstance().logger().warn("Failed load shop data, because target config can't deserialize the ItemStack", th);
       Log.debug("Failed to load data to the ItemStack: " + config);
       return null;
     }
@@ -697,25 +707,6 @@ public class Util {
       }
     }
 
-    if(itemStack.getType().getKey().getKey().toUpperCase(Locale.ROOT).contains("MUSIC_DISC")) {
-
-      final String working = itemStack.getType().getKey().getKey().toUpperCase(Locale.ROOT);
-      final String[] split = working.split("_");
-      if(split.length >= 3) {
-
-        return Component.text(split[1] + " " + split[2]);
-      }
-    }
-
-    if(itemStack.getType().getKey().getKey().toUpperCase(Locale.ROOT).contains("SMITHING_TEMPLATE")) {
-
-      final String working = itemStack.getType().getKey().getKey().toUpperCase(Locale.ROOT);
-      final String[] split = working.split("_");
-      if(split.length >= 2) {
-
-        return Component.text(split[0] + " " + split[1]);
-      }
-    }
 
     if(!itemStack.hasItemMeta() || QuickShop.getInstance().getConfig().getBoolean("shop.force-use-item-original-name")) {
 
@@ -854,6 +845,48 @@ public class Util {
       total += value.getAmount();
     }
     return total;
+  }
+
+  /**
+   * Waits for the completion of a given {@link CompletableFuture} within a specified timeout period.
+   * Throws appropriate exceptions if the future times out, encounters an execution error,
+   * or the thread is interrupted.
+   *
+   * @param <T> The type of the result returned by the CompletableFuture.
+   * @param future The CompletableFuture to wait for; must not be null.
+   * @param timeout The maximum time to wait for the future to complete.
+   * @param unit The time unit of the timeout argument.
+   * @param description A description of the future operation, used for exception messages.
+   * @return The result of the completed CompletableFuture.
+   * @throws IllegalStateException If the provided future is null.
+   * @throws RuntimeException If the future times out, is interrupted, or encounters an execution error.
+   */
+  public static <T> T waitForFuture(final CompletableFuture<T> future, final long timeout, final TimeUnit unit, final String description) throws RuntimeException {
+
+    if(future == null) {
+
+      throw new IllegalStateException("Future for " + description + " was null");
+    }
+    try {
+
+      return future.get(timeout, unit);
+    } catch(final TimeoutException e) {
+
+      throw new RuntimeException("Timed out waiting for " + description, e);
+    } catch(final ExecutionException e) {
+
+      //Unwrap the cause so logs are more useful
+      final Throwable cause = (e.getCause() != null)? e.getCause() : e;
+      if(cause instanceof final RuntimeException re) {
+
+        throw re;
+      }
+      throw new RuntimeException("Error while waiting for " + description, cause);
+    } catch(final InterruptedException e) {
+
+      Thread.currentThread().interrupt();
+      throw new RuntimeException("Interrupted while waiting for " + description, e);
+    }
   }
 
   /**
@@ -1386,7 +1419,7 @@ public class Util {
 
   public static boolean checkIfBungee() {
 
-    if(PackageUtil.parsePackageProperly("forceBungeeCord").asBoolean(false)) {
+    if(plugin.getConfig().getBoolean("proxy.force-bungeecord", false)) {
       return true;
     }
 

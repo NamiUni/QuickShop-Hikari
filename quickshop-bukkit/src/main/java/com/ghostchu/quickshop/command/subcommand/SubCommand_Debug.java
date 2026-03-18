@@ -87,12 +87,12 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
     final List<Entity> entities = new ArrayList<>();
     for(final World world : Bukkit.getWorlds()) {
       for(final Entity entity : world.getEntities()) {
-        if(entity instanceof Item itemEntity) {
+        if(entity instanceof final Item itemEntity) {
           if(AbstractDisplayItem.checkIsGuardItemStack(itemEntity.getItemStack())) {
             entities.add(entity);
           }
         }
-        if(entity instanceof ItemDisplay itemDisplay) {
+        if(entity instanceof final ItemDisplay itemDisplay) {
           if(AbstractDisplayItem.checkIsGuardItemStack(itemDisplay.getItemStack())) {
             entities.add(entity);
           }
@@ -131,7 +131,7 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
 
   private void handleItemInfo(final CommandSender sender, final List<String> subParams) {
 
-    if(!(sender instanceof Player player)) {
+    if(!(sender instanceof final Player player)) {
       return;
     }
     if(player.getInventory().getItemInMainHand().getType().isAir()) {
@@ -157,7 +157,6 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
     hikariDataSource.setMaximumPoolSize(size);
     hikariDataSource.setMinimumIdle(size);
     plugin.text().of(sender, "debug.hikari-cp-size-tweak", size).send();
-    ;
   }
 
   private void handleDbConnectionTest(final CommandSender sender, final List<String> subParams) {
@@ -165,22 +164,21 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
     plugin.text().of(sender, "debug.hikari-cp-testing").send();
     try {
       CompletableFuture.supplyAsync(()->{
-        try(Connection connection = plugin.getSqlManager().getConnection()) {
+        try(final Connection connection = plugin.getSqlManager().getConnection()) {
           if(connection.isValid(1000)) {
             plugin.text().of(sender, "debug.hikari-cp-working").send();
-            ;
           } else {
             plugin.text().of(sender, "debug.hikari-cp-not-working");
           }
-        } catch(SQLException e) {
+        } catch(final SQLException e) {
           plugin.text().of(sender, "internal-error").send();
           e.printStackTrace();
         }
         return null;
       }).get(5, TimeUnit.SECONDS);
-    } catch(TimeoutException e) {
+    } catch(final TimeoutException e) {
       plugin.text().of(sender, "debug.hikari-cp-timeout").send();
-    } catch(ExecutionException | InterruptedException e) {
+    } catch(final ExecutionException | InterruptedException e) {
       plugin.text().of(sender, "internal-error").send();
       e.printStackTrace();
     }
@@ -214,7 +212,7 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
       sender.sendMessage("Idle connections: " + hikariPool.getIdleConnections());
       sender.sendMessage("Total connections: " + hikariPool.getTotalConnections());
       sender.sendMessage("Threads Awaiting connections: " + hikariPool.getThreadsAwaitingConnection());
-    } catch(Exception e) {
+    } catch(final Exception e) {
       plugin.logger().warn("Failed retrieve HikariPool internal state.", e);
     }
   }
@@ -326,12 +324,14 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
   private void handleShopsLoaderReload(final CommandSender sender, final List<String> remove) {
 
     plugin.text().of(sender, "debug.force-shop-loader-reload").send();
-    final List<Shop> allShops = plugin.getShopManager().getAllShops();
+    final List<Shop> allShops = new ArrayList<>(plugin.getShopManager().getAllShops());
     plugin.text().of(sender, "debug.force-shop-loader-reload-unloading-shops-from-memory", allShops.size()).send();
-    plugin.getShopManager().getAllShops().forEach(shop->plugin.getShopManager().unloadShop(shop));
+    allShops.forEach(shop->plugin.getShopManager().unloadShop(shop));
     plugin.text().of(sender, "debug.force-shop-loader-reload-reloading-shop-loader").send();
-    plugin.getShopLoader().loadShops();
-    plugin.text().of(sender, "debug.force-shop-loader-reload-complete").send();
+    Util.asyncThreadRun(()->{
+      plugin.getShopLoader().loadShops();
+      plugin.text().of(sender, "debug.force-shop-loader-reload-complete").send();
+    });
   }
 
   private void handleShopsReload(final CommandSender sender, final List<String> remove) {
@@ -439,7 +439,7 @@ public class SubCommand_Debug implements CommandHandler<CommandSender> {
                                                                                         + ChatColor.GREEN
                                                                                         + listener1.getListener().getClass().getCanonicalName()));
       }
-    } catch(Exception th) {
+    } catch(final Exception th) {
       MsgUtil.sendDirectMessage(sender, Component.text("ERR " + th.getMessage()).color(NamedTextColor.RED));
       plugin.logger().warn("An error has occurred while getting the HandlerList", th);
     }

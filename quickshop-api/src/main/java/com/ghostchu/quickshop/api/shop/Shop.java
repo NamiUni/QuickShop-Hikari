@@ -29,7 +29,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * A shop
  */
-public interface Shop {
+public interface Shop extends Locatable<Location> {
 
   NamespacedKey SHOP_NAMESPACED_KEY = new NamespacedKey(QuickShopAPI.getPluginInstance(), "shopsign");
 
@@ -129,14 +129,6 @@ public interface Shop {
    * @param item ItemStack to set
    */
   void setItem(@NotNull ItemStack item);
-
-  /**
-   * Get shop's location
-   *
-   * @return Shop's location
-   */
-  @NotNull
-  Location getLocation();
 
 
   /**
@@ -661,6 +653,14 @@ public interface Shop {
   CompletableFuture<Void> update();
 
   /**
+   * Update shop data to database synchronously. This will create the completeable future for the save
+   * function, and wait for it to complete. DON'T USE IF YOU DON'T KNOW WHAT YOU'RE DOING!
+   *
+   * @throws RuntimeException
+   */
+  void updateSync() throws RuntimeException;
+
+  /**
    * Gets the benefit in this shop
    */
   @NotNull
@@ -670,5 +670,4 @@ public interface Shop {
    * Sets the benefit in this shop
    */
   void setShopBenefit(@NotNull BenefitProvider benefit);
-
 }

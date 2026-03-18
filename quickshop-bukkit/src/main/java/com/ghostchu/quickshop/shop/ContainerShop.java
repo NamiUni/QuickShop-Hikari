@@ -48,7 +48,6 @@ import com.ghostchu.quickshop.util.logging.container.ShopRemoveLog;
 import com.ghostchu.quickshop.util.performance.PerfMonitor;
 import com.ghostchu.simplereloadlib.ReloadResult;
 import com.ghostchu.simplereloadlib.Reloadable;
-import io.papermc.lib.PaperLib;
 import lombok.EqualsAndHashCode;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
@@ -77,6 +76,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -84,6 +84,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static com.ghostchu.quickshop.util.Util.waitForFuture;
 
 /**
  * ChestShop core
@@ -140,6 +144,10 @@ public class ContainerShop implements Shop, Reloadable {
 
   @NotNull
   private BenefitProvider benefit;
+
+  //updating objects
+  private final AtomicBoolean updatingAtomic = new AtomicBoolean(false);
+  private volatile CompletableFuture<Void> inFlightUpdate;
 
 
   /**
@@ -339,7 +347,11 @@ public class ContainerShop implements Shop, Reloadable {
       try {
         final DisplayProvider provider = ServiceInjector.getInjectedService(DisplayProvider.class, null);
         if(provider == null && AbstractDisplayItem.getNowUsing() == DisplayType.VIRTUALITEM && plugin.getVirtualDisplayItemManager() == null) {
-          plugin.logger().warn("Using invalid display provider.");
+          plugin.logger().warn("Invalid display provider! " +
+                               "No compatible display backend found. " +
+                               "This may occur if ProtocolLib or PacketEvents is missing, outdated, or incompatible with your Minecraft version, " +
+                               "or if this QuickShop-Hikari build does not yet support the current server version. " +
+                               "Shops will function normally, but displays above containers are disabled.");
           return;
         }
 
@@ -356,7 +368,11 @@ public class ContainerShop implements Shop, Reloadable {
         }
 
         if(this.displayItem == null) {
-          plugin.logger().warn("Using invalid display provider.");
+          plugin.logger().warn("Invalid display provider! " +
+                               "No compatible display backend found. " +
+                               "This may occur if ProtocolLib or PacketEvents is missing, outdated, or incompatible with your Minecraft version, " +
+                               "or if this QuickShop-Hikari build does not yet support the current server version. " +
+                               "Shops will function normally, but displays above containers are disabled.");
           return;
         }
       } catch(final Throwable anyError) {
@@ -641,13 +657,17 @@ public class ContainerShop implements Shop, Reloadable {
   public int getRemainingSpace() {
 
     if(this.unlimited) {
+
       return -1;
     }
+
     if(Bukkit.isPrimaryThread()) {
+
       if(this.getInventory() == null) {
         Log.debug("Failed to calc RemainingSpace for shop " + this + ": Inventory null.");
         return 0;
       }
+
       final int space = Util.countSpace(this.getInventory(), this);
       new ShopInventoryCalculateEvent(this, space, -1).callEvent();
       Log.debug("Space count is: " + space);
@@ -669,24 +689,43 @@ public class ContainerShop implements Shop, Reloadable {
     if(this.unlimited) {
       return -1;
     }
-    if(Bukkit.isPrimaryThread()) {
+
+    if(Bukkit.getServer().isOwnedByCurrentRegion(location)) {
+
       if(this.getInventory() == null) {
-        Log.debug("Failed to calc RemainingStock for shop " + this + ": Inventory null.");
         return 0;
       }
       final int stock = Util.countItems(this.getInventory(), this);
       new ShopInventoryCalculateEvent(this, -1, stock).callEvent();
       return stock;
-    } else {
-      return plugin.getShopManager().queryShopInventoryCacheInDatabase(this).join().getStock();
     }
+
+    final CompletableFuture<Integer> future = new CompletableFuture<>();
+
+    QuickShop.folia()
+      .getScheduler()
+      .runAtLocation(
+        this.location,
+        task->{
+          if(this.getInventory() == null) {
+            future.complete(0);
+            return;
+          }
+
+          final int stock = Util.countItems(this.getInventory(), this);
+          new ShopInventoryCalculateEvent(this, -1, stock).callEvent();
+
+          future.complete(stock);
+        });
+
+    return future.join();
   }
 
   /**
-   * WARNING: This UUID will changed after plugin reload, shop reload or server restart DO NOT USE
-   * IT TO STORE DATA!
+   * Retrieves the runtime-generated random unique identifier for the current instance. DO NOT USE FOR
+   * DATA STORAGE.
    *
-   * @return Random UUID
+   * @return a non-null {@link UUID} representing a unique identifier that was generated at runtime.
    */
   @Override
   public @NotNull UUID getRuntimeRandomUniqueId() {
@@ -833,49 +872,8 @@ public class ContainerShop implements Shop, Reloadable {
   public List<Component> getSignText(@NotNull final ProxiedLocale locale) {
 
     Util.ensureThread(false);
-    final List<Component> lines = new ArrayList<>(4);
-    //Line 1
-    final String headerKey = inventoryAvailable()? "signs.header-available" : "signs.header-unavailable";
-    lines.add(plugin.text().of(headerKey, this.ownerName(false, locale)).forLocale(locale.getLocale()));
-    //Line 2
-    final String tradingStringKey = (isStackingShop()? shopType().stackTradingTranslationKey() : shopType().tradingTranslationKey());
-    final String noRemainingStringKey = shopType.outOfStockTranslationKey();
-    final int shopRemaining = shopType().remainingStock(this);
 
-
-    final Component line2 = switch(shopRemaining) {
-      //Unlimited
-      case -1 ->
-              plugin.text().of(tradingStringKey, plugin.text().of("signs.unlimited").forLocale(locale.getLocale())).forLocale(locale.getLocale());
-      //No remaining
-      case 0 -> plugin.text().of(noRemainingStringKey).forLocale(locale.getLocale());
-      //Has remaining
-      default ->
-              plugin.text().of(tradingStringKey, Component.text(shopRemaining)).forLocale(locale.getLocale());
-    };
-    lines.add(line2);
-
-    //line 3
-    if(plugin.getConfig().getBoolean("shop.force-use-item-original-name") || !this.getItem().hasItemMeta() || !this.getItem().getItemMeta().hasDisplayName()) {
-      final Component left = plugin.text().of("signs.item-left").forLocale(locale.getLocale());
-      final Component right = plugin.text().of("signs.item-right").forLocale(locale.getLocale());
-      final Component itemName = Util.getItemStackName(getItem());
-      lines.add(left.append(itemName).append(right));
-    } else {
-      lines.add(plugin.text().of("signs.item-left").forLocale(locale.getLocale()).append(Util.getItemStackName(getItem()).append(plugin.text().of("signs.item-right").forLocale(locale.getLocale()))));
-    }
-
-    //line 4
-    final Component line4;
-    if(this.isStackingShop()) {
-      line4 = plugin.text().of("signs.stack-price",
-                               plugin.getShopManager().format(this.getPrice(), this),
-                               item.getAmount(),
-                               Util.getItemStackName(item)).forLocale(locale.getLocale());
-    } else {
-      line4 = plugin.text().of("signs.price", plugin.getShopManager().format(this.getPrice(), this)).forLocale(locale.getLocale());
-    }
-    lines.add(line4);
+    final LinkedList<Component> lines = plugin.getShopManager().shopLayoutProvider().render(this, locale);
 
     final ShopSignLinesEvent event = new ShopSignLinesEvent(Phase.RETRIEVE, this, lines);
     event.callEvent();
@@ -905,7 +903,7 @@ public class ContainerShop implements Shop, Reloadable {
       if(b == null) {
         continue;
       }
-      final BlockState state = PaperLib.getBlockState(b, false).getState();
+      final BlockState state = b.getState(false);
       if(!(state instanceof final Sign sign)) {
         continue;
       }
@@ -1262,7 +1260,7 @@ public class ContainerShop implements Shop, Reloadable {
         plugin.logger().warn("Failed to load shop: {}: {}: {}", symbolLink, this.getClass().getName(), "Inventory is null");
         if(plugin.getConfig().getBoolean("debug.delete-corrupt-shops")) {
           plugin.logger().warn("Deleting corrupt shop...");
-          plugin.getShopManager().deleteShop(this);
+          Util.regionThread(location, () -> plugin.getShopManager().deleteShop(this));
         } else {
           plugin.logger().warn("Unloading shops from memory, set `debug.delete-corrupt-shops` to true to delete corrupted shops.");
           plugin.getShopManager().unloadShop(this);
@@ -1279,7 +1277,7 @@ public class ContainerShop implements Shop, Reloadable {
     try(final PerfMonitor ignored = new PerfMonitor("Shop Display Check", Duration.of(1, ChronoUnit.SECONDS))) {
       checkDisplay();
     }
-    if(PackageUtil.parsePackageProperly("updateShopSignOnLoad").asBoolean(false)) {
+    if(plugin.getConfig().getBoolean("shop.update-sign-on-load", false)) {
       Log.debug("Scheduled sign update for shop " + this + " because updateShopSignOnLoad has been enabled.");
       plugin.getSignUpdateWatcher().scheduleSignUpdate(this);
     }
@@ -1692,7 +1690,7 @@ public class ContainerShop implements Shop, Reloadable {
     }
     if(plugin.getSignHooker() != null) {
       Log.debug("Start sign broadcast...");
-      QuickShop.folia().getScheduler().runLater(()->plugin.getSignHooker().updatePerPlayerShopSignBroadcast(getLocation(), this), 2);
+      plugin.getSignHooker().updatePerPlayerShopSignBroadcast(getLocation(), this);
       Log.debug("Sign broadcast completed.");
     }
   }
@@ -1721,10 +1719,12 @@ public class ContainerShop implements Shop, Reloadable {
   @Override
   @NotNull
   public CompletableFuture<Void> update() {
-    // Warning! This method can be run in async thread.
+
+    //Warning! This method can be run in async thread.
     if(updating) {
       return CompletableFuture.completedFuture(null);
     }
+
     if(this.shopId == -1) {
       Log.debug("Skip shop database update because it not fully setup!");
       return CompletableFuture.completedFuture(null);
@@ -1741,17 +1741,31 @@ public class ContainerShop implements Shop, Reloadable {
     event = event.clone(Phase.POST);
     event.callEvent();
 
-    updating = true;
-    return plugin.getDatabaseHelper().updateShop(this)
-            .whenComplete((result, throwable)->{
-              updating = false;
-              if(throwable == null) {
-                this.dirty = false;
+    //If already updating, just return the same future
+    if(!updatingAtomic.compareAndSet(false, true)) {
+      return inFlightUpdate != null ? inFlightUpdate : CompletableFuture.completedFuture(null);
+    }
+
+    //Start a new update
+    final CompletableFuture<Void> f = plugin.getDatabaseHelper().updateShop(this)
+            .whenComplete((r, th) -> {
+              updatingAtomic.set(false);
+              if (th == null) {
+                dirty = false;
               } else {
-                plugin.logger().warn(
-                        "Could not update a shop in the database! Changes will revert after a reboot!", throwable);
+                plugin.logger().warn("Could not update shop in DB!", th);
               }
             });
+
+    inFlightUpdate = f;
+    return f;
+  }
+
+  @Override
+  public void updateSync() throws RuntimeException {
+    final CompletableFuture<Void> future = update();
+
+    waitForFuture(future, 15, TimeUnit.SECONDS, "updateShop(" + shopId + ")");
   }
 
   @Override
